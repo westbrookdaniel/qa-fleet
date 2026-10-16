@@ -1,0 +1,10 @@
+build/
+dist/
+.qa-fleet/
+
+node_modules
+.qa-fleet-results/
+playwright-report/
+test-results/
+
+.browsers

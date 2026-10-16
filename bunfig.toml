@@ -1,0 +1,2 @@
+# Deliberately empty runtime settings. Fleet children use this explicit file,
+# --no-env-file and --no-install instead of a suite's implicit Bun configuration.
