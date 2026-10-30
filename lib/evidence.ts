@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { link, lstat, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { applicationSources, validateAppSources } from './application-sources.ts';
 import { WorkspaceInputError } from './errors.ts';
 import { inspectExecution } from './execution-evidence.ts';
 import { publicResult, runSuite } from './runner.ts';
@@ -43,6 +44,7 @@ export async function workspaceSnapshot(root: string, scope?: SourceScope) {
   ];
   let dependencyMode: 'workspace' | 'static-imports' | 'workspace-fallback' = 'workspace';
   let checkpointFiles: string[] | undefined;
+  let appSources: string[] | undefined;
   if (scope) {
     const imported = await importedSources(root, [
       'fixtures.ts',
@@ -50,6 +52,8 @@ export async function workspaceSnapshot(root: string, scope?: SourceScope) {
       scope.spec,
     ]);
     dependencyMode = imported.dependencyMode;
+    appSources = imported.appSources;
+    if (appSources) validateAppSources(appSources);
     checkpointFiles = [...new Set([...files, ...imported.staticFiles])].sort();
     files.push(...imported.files);
   } else {
@@ -66,6 +70,7 @@ export async function workspaceSnapshot(root: string, scope?: SourceScope) {
     hash: digest(JSON.stringify({ hashes, runtimeFingerprint })),
     files: hashes,
     runtimeHash: runtimeFingerprint,
+    ...(appSources === undefined ? {} : { appSources }),
     ...(scope ? { scope, dependencyMode, checkpointFiles } : {}),
   };
 }
@@ -144,6 +149,8 @@ export interface Observation {
   parametersHash: string;
   deployment: string | null;
   application: Awaited<ReturnType<typeof applicationSnapshot>>;
+  applicationSources?: Awaited<ReturnType<typeof applicationSources>>;
+  targetIdentity?: { json: string; hash: string; value: Record<string, unknown> };
   source: Awaited<ReturnType<typeof workspaceSnapshot>>;
   spec: string;
   specHash: string;
@@ -327,6 +334,7 @@ export async function verifyFlow(options: {
   deployment?: string;
   timeout: number;
   workers: number;
+  targetIdentity?: string;
 }) {
   const root = path.resolve(options.workspace);
   await assertWorkspaceRuntime(root);
@@ -338,6 +346,13 @@ export async function verifyFlow(options: {
   const config = await readWorkspace(root);
   const source = await workspaceSnapshot(root, scope);
   const application = await applicationSnapshot(config.applicationCheckout);
+  const appSourceSnapshot =
+    source.appSources === undefined
+      ? undefined
+      : await applicationSources(config.applicationCheckout, source.appSources);
+  const callerIdentity = options.targetIdentity
+    ? await readTargetIdentity(options.targetIdentity)
+    : undefined;
   const identity = targetIdentity(options.environment, options.deployment);
   const playwrightPackage = JSON.parse(
     await readFile(
@@ -375,8 +390,11 @@ export async function verifyFlow(options: {
   try {
     sourcesUnchanged =
       source.hash === (await workspaceSnapshot(root, scope)).hash &&
-      JSON.stringify(application) ===
-        JSON.stringify(await applicationSnapshot(config.applicationCheckout)) &&
+      (appSourceSnapshot
+        ? appSourceSnapshot.hash ===
+          (await applicationSources(config.applicationCheckout, appSourceSnapshot.patterns)).hash
+        : JSON.stringify(application) ===
+          JSON.stringify(await applicationSnapshot(config.applicationCheckout))) &&
       specHash === digest(await readFile(spec));
   } catch {
     // A concurrent deletion or invalid edit retains a non-passing completed observation.
@@ -403,6 +421,8 @@ export async function verifyFlow(options: {
     ...identity,
     application,
     source,
+    applicationSources: appSourceSnapshot,
+    targetIdentity: callerIdentity,
     spec: options.spec,
     specHash,
     observedPassing,
@@ -552,7 +572,15 @@ export async function flowStatus(root: string) {
       else if (record.schemaVersion !== 2) status = 'historical-evidence';
       else if (
         record.source.hash !== (await currentHash(record.spec)) ||
-        JSON.stringify(record.application) !== JSON.stringify(application)
+        (record.applicationSources
+          ? record.applicationSources.hash !==
+            (
+              await applicationSources(
+                config.applicationCheckout,
+                record.applicationSources.patterns,
+              )
+            ).hash
+          : JSON.stringify(record.application) !== JSON.stringify(application))
       )
         status = 'changed-since-observation';
       else if (record.observedPassing) status = 'observed-passing';
@@ -570,6 +598,8 @@ export async function flowStatus(root: string) {
         observedPassing: record.observedPassing,
         testVerdict: record.result.test.verdict,
         cleanupComplete: record.result.cleanup.complete,
+        targetIdentity: record.targetIdentity,
+        applicationSources: record.applicationSources,
         checkpoint: record.checkpoint,
         checkpointError: record.checkpointError,
         sourceDependencies: Object.keys(record.source.files ?? {}).sort(),
@@ -577,4 +607,17 @@ export async function flowStatus(root: string) {
     }),
   );
   return { flows, pendingAttempts };
+}
+
+export async function readTargetIdentity(filename: string) {
+  const json = await readFile(filename, 'utf8');
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    throw new WorkspaceInputError('Target identity must be a JSON object.');
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new WorkspaceInputError('Target identity must be a JSON object.');
+  return { json, hash: digest(json), value: value as Record<string, unknown> };
 }

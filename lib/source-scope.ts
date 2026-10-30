@@ -30,7 +30,10 @@ const builtins = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]
 
 // Use the actual compiler for type-only dependencies. Driving a lexer without
 // parser context can stall on regex literals; this subprocess has a hard bound.
-async function compilerSources(root: string, entrypoints: string[]): Promise<string[]> {
+async function compilerSources(
+  root: string,
+  entrypoints: string[],
+): Promise<{ files: string[]; appSources?: string[] }> {
   const runtime = workspaceRuntimeDirectory(root);
   const dependencies = await realpath(path.join(root, 'node_modules'));
   const privateDirectory = path.join(root, '.fleet');
@@ -60,10 +63,38 @@ async function compilerSources(root: string, entrypoints: string[]): Promise<str
         '--no-env-file',
         '--no-install',
         `--config=${path.join(runtime, 'bunfig.toml')}`,
-        runtimeDependencyFile(runtime, 'typescript', 'bin/tsc'),
-        '--project',
-        configuration,
-        '--listFilesOnly',
+        '--eval',
+        `const { API } = await import(${JSON.stringify(runtimeDependencyFile(runtime, 'typescript', 'dist/api/async/api.js'))});
+const ast = await import(${JSON.stringify(runtimeDependencyFile(runtime, 'typescript', 'dist/ast/index.js'))});
+const api = new API({ cwd: ${JSON.stringify(root)} });
+try {
+  const snapshot = await api.updateSnapshot({ openProjects: [${JSON.stringify(configuration)}] });
+  const project = snapshot.getProject(${JSON.stringify(configuration)});
+  if (!project) throw new Error('Missing compiler project');
+  const files = await project.program.getSourceFileNames();
+  let declared = false;
+  const patterns = new Set();
+  for (const file of files) {
+    if (!file.startsWith(${JSON.stringify(root + path.sep)}) || file.includes('/node_modules/')) continue;
+    const source = await project.program.getSourceFile(file);
+    for (const statement of source.statements) {
+      if (!ast.isVariableStatement(statement)) continue;
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ast.isIdentifier(declaration.name) || declaration.name.text !== 'appSources') continue;
+        if (!(statement.modifierFlags & ast.ModifierFlags.Export) || !(statement.declarationList.flags & ast.NodeFlags.Const))
+          throw new Error('appSources must be an exported const');
+        let value = declaration.initializer;
+        // The compiler AST represents as-const as a type reference.
+        if (value && ast.isAsExpression(value) && value.type.typeName?.text === 'const') value = value.expression;
+        if (!value || !ast.isArrayLiteralExpression(value) || value.elements.some(e => !ast.isStringLiteral(e)))
+          throw new Error('appSources must be a string-literal array');
+        declared = true;
+        for (const element of value.elements) patterns.add(element.text);
+      }
+    }
+  }
+  console.log(JSON.stringify({ files, ...(declared ? { appSources: [...patterns].sort() } : {}) }));
+} finally { await api.close(); }`,
       ],
       {
         cwd: root,
@@ -82,14 +113,15 @@ async function compilerSources(root: string, entrypoints: string[]): Promise<str
     await rm(temporary, { recursive: true, force: true });
   }
   const files: string[] = [];
-  for (const filename of output.trim().split(/\r?\n/).filter(Boolean)) {
+  const inspected = JSON.parse(output) as { files: string[]; appSources?: string[] };
+  for (const filename of inspected.files) {
     const resolved = await realpath(filename);
     if (resolved.startsWith(`${dependencies}${path.sep}`)) continue;
     const runtimeFile = path.relative(await realpath(runtime), resolved);
     if (['fixtures.ts'].includes(runtimeFile)) continue;
     files.push(await containedSource(root, filename));
   }
-  return files;
+  return { files, appSources: inspected.appSources };
 }
 
 async function containedSource(root: string, file: string): Promise<string> {
@@ -202,10 +234,13 @@ export async function importedSources(root: string, entrypoints: string[]) {
     }
   }
   for (const entry of entrypoints) await visit(entry);
-  for (const file of await compilerSources(workspace, entrypoints)) await visit(file);
+  const compiled = await compilerSources(workspace, entrypoints);
+  for (const file of compiled.files) await visit(file);
   return {
     files: fallback ? await publicWorkspaceFiles(workspace) : [...visited],
     staticFiles: [...visited],
+    // Dynamic imports leave the application scope unknown too.
+    appSources: fallback ? undefined : compiled.appSources,
     dependencyMode: fallback ? ('workspace-fallback' as const) : ('static-imports' as const),
   };
 }

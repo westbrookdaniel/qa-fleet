@@ -55,3 +55,17 @@ Report the flow, target, observed assertions, and evidence location. Keep the te
 Passing evidence belongs to the executed flow and its recorded environment and source. An imported helper is a dependency, not independent proof that the helper ran or passed. A local checkpoint preserves source and does not establish deployment, CI, or release.
 
 Leave a usable spec and helper source with a precise passing, failing, blocked, or unrun status. Include the remaining recovery step when needed. Fleet checkpoints are local; sharing or pushing the workspace is a separate action.
+
+## Caller integration
+
+Declare `export const appSources = ['src/components/feature/**'] as const` in
+specs or transitive imported parts to scope application maintenance. Fleet reads
+literal arrays with the compiler AST and never executes helper metadata.
+Undeclared flows retain whole-checkout invalidation. Use
+`status --maintenance --app-base origin/main` to select kept flows intersecting
+the application diff even before evidence exists; `undeclared` means unknown.
+`FLEET_APPLICATION_CHECKOUT` can point this selector at a worktree.
+
+Pass a caller-produced doctor receipt with `verify --target-identity <json-file>`.
+Fleet records the JSON verbatim and its hash; status displays it. The receipt
+is caller-asserted, not independent proof Fleet checked the running stack.

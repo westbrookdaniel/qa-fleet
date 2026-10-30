@@ -10,8 +10,8 @@ export const workspaceUsage = `QA workspaces:
   qa-fleet catalog search [--workspace <directory>] [--query <words>] [--kind fixture|action|assertion|flow] [--limit <1..100>] [--offset <0..>]
   qa-fleet catalog show [--workspace <directory>] --id <helper-id> [--id <another-id> ...]
   qa-fleet catalog add [--workspace <directory>] --file <metadata.json>
-  qa-fleet verify [--workspace <directory>] --spec specs/<name>.spec.ts --environment <label> --timeout <1..900> --workers <1..4> [--deployment <id>]
-  qa-fleet status [--workspace <directory>] [--maintenance [--limit <1..100>] [--offset <0..>]]
+  qa-fleet verify [--workspace <directory>] --spec specs/<name>.spec.ts --environment <label> --timeout <1..900> --workers <1..4> [--deployment <id>] [--target-identity <json-file>]
+  qa-fleet status [--workspace <directory>] [--maintenance [--app-base <git-ref>] [--limit <1..100>] [--offset <0..>]]
 
 Commands return JSON. FLEET_BASE_URL selects the authorized application target.
 --workspace defaults to the current directory only when it contains valid fleet.json.
@@ -39,6 +39,8 @@ export async function workspaceMain(args: string[]) {
       limit: { type: 'string' },
       offset: { type: 'string' },
       maintenance: { type: 'boolean' },
+      'app-base': { type: 'string' },
+      'target-identity': { type: 'string' },
       file: { type: 'string' },
       spec: { type: 'string' },
       environment: { type: 'string' },
@@ -55,8 +57,16 @@ export async function workspaceMain(args: string[]) {
   const command = positionals[0];
   const commandOptions: Record<string, string[]> = {
     init: ['app-checkout'],
-    status: ['workspace', 'maintenance', 'limit', 'offset'],
-    verify: ['workspace', 'spec', 'environment', 'deployment', 'timeout', 'workers'],
+    status: ['workspace', 'maintenance', 'limit', 'offset', 'app-base'],
+    verify: [
+      'workspace',
+      'spec',
+      'environment',
+      'deployment',
+      'timeout',
+      'workers',
+      'target-identity',
+    ],
   };
   if (command !== 'catalog') {
     const allowed = commandOptions[command];
@@ -109,10 +119,16 @@ export async function workspaceMain(args: string[]) {
         result = { contract: await addPart(workspace, values.file), status: 'registered' };
       } else throw new WorkspaceInputError('Invalid catalog arguments.');
     } else if (command === 'status' && positionals.length === 1) {
-      if (!values.maintenance && (values.limit !== undefined || values.offset !== undefined))
+      if (
+        !values.maintenance &&
+        (values.limit !== undefined ||
+          values.offset !== undefined ||
+          values['app-base'] !== undefined)
+      )
         throw new WorkspaceInputError('Status pagination requires --maintenance.');
       result = values.maintenance
         ? await maintenanceReport(workspace, {
+            appBase: values['app-base'],
             limit: values.limit === undefined ? undefined : Number(values.limit),
             offset: values.offset === undefined ? undefined : Number(values.offset),
           })
@@ -139,6 +155,7 @@ export async function workspaceMain(args: string[]) {
         spec: values.spec,
         environment: values.environment,
         deployment: values.deployment,
+        targetIdentity: values['target-identity'],
         timeout,
         workers,
       });

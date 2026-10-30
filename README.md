@@ -41,6 +41,8 @@ qa-fleet --help
 
 This installs the CLI to `~/.local` (change with `--prefix`) plus the [companion skill](skills/qa-fleet/SKILL.md) that teaches your agent the workflow. Re-running updates in place and keeps the previous version as a recovery copy.
 
+To install the companion skill for Claude as well, rerun with `--skill-dir "$HOME/.claude/skills/qa-fleet"`. Each destination keeps its own ownership marker, so rerun both to update both.
+
 ## Quick start
 
 Create a QA workspace for your app (outside the app checkout):

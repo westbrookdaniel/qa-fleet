@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { applicationDiff, applicationSources, matchesAppSource } from './application-sources.ts';
 import { WorkspaceInputError } from './errors.ts';
 import {
   applicationSnapshot,
@@ -12,6 +13,7 @@ import {
   workspaceRuntimeHash,
   workspaceSnapshot,
 } from './evidence.ts';
+import { publicWorkspaceFiles } from './source-scope.ts';
 import { assertWorkspaceRuntime, readWorkspace, workspaceFile } from './workspace.ts';
 
 function publicSourcePath(file: string): boolean {
@@ -35,7 +37,7 @@ function publicSourcePath(file: string): boolean {
 /** A replay plan derived from recorded dependencies; it never executes or repairs a flow. */
 export async function maintenanceReport(
   root: string,
-  options: { limit?: number; offset?: number } = {},
+  options: { limit?: number; offset?: number; appBase?: string } = {},
 ) {
   const limit = options.limit ?? 20;
   const offset = options.offset ?? 0;
@@ -51,6 +53,28 @@ export async function maintenanceReport(
     );
   await assertWorkspaceRuntime(root);
   const config = await readWorkspace(root);
+  const appDiff = options.appBase
+    ? applicationDiff(config.applicationCheckout, options.appBase)
+    : undefined;
+  const selectedFlows = [];
+  if (appDiff) {
+    for (const spec of (await publicWorkspaceFiles(root, 'specs'))
+      .filter((file) => /\.spec\.[cm]?[jt]sx?$/.test(file))
+      .sort()) {
+      const source = await workspaceSnapshot(root, { spec });
+      const patterns = source.appSources;
+      const changedFiles =
+        patterns === undefined
+          ? []
+          : appDiff.changedFiles.filter((file) => matchesAppSource(file, patterns));
+      if (source.appSources === undefined || changedFiles.length)
+        selectedFlows.push({
+          spec,
+          status: source.appSources === undefined ? 'undeclared' : 'affected',
+          changedFiles,
+        });
+    }
+  }
   const [records, application, runtimeHash] = await Promise.all([
     readObservations(root),
     applicationSnapshot(config.applicationCheckout),
@@ -125,7 +149,23 @@ export async function maintenanceReport(
       if (changedFiles.length > 0) reasons.push('source-changed');
       if (missingFiles.length > 0) reasons.push('source-missing');
       if (record.source.runtimeHash !== runtimeHash) reasons.push('runtime-changed');
-      if (JSON.stringify(record.application) !== JSON.stringify(application))
+      let applicationChangedFiles: string[] = [];
+      let applicationAddedFiles: string[] = [];
+      let applicationRemovedFiles: string[] = [];
+      if (record.applicationSources) {
+        const previous = record.applicationSources.files;
+        const actual = await applicationSources(
+          config.applicationCheckout,
+          current?.appSources ?? record.applicationSources.patterns,
+        );
+        applicationChangedFiles = Object.keys(previous).filter(
+          (file) => file in actual.files && previous[file] !== actual.files[file],
+        );
+        applicationAddedFiles = Object.keys(actual.files).filter((file) => !(file in previous));
+        applicationRemovedFiles = Object.keys(previous).filter((file) => !(file in actual.files));
+        if (actual.hash !== record.applicationSources.hash)
+          reasons.push('application-sources-changed');
+      } else if (JSON.stringify(record.application) !== JSON.stringify(application))
         reasons.push('application-checkout-changed');
       if (record.result.test.verdict !== 'passed') reasons.push('last-run-not-passed');
       if (!record.result.cleanup.complete) reasons.push('cleanup-incomplete');
@@ -144,6 +184,9 @@ export async function maintenanceReport(
         parametersHash: record.parametersHash,
         latestFinished: record.finished,
         reasons,
+        applicationChangedFiles,
+        applicationAddedFiles,
+        applicationRemovedFiles,
         changedFiles: changedFiles.sort(),
         missingFiles: missingFiles.sort(),
         addedFiles: addedFiles.sort(),
@@ -159,6 +202,7 @@ export async function maintenanceReport(
   const nextOffset = offset + limit < replayCandidates.length ? offset + limit : null;
   return {
     schemaVersion: 2,
+    ...(appDiff ? { applicationDiff: { ...appDiff, flows: selectedFlows } } : {}),
     summary: {
       recordedFlowScopes: flows.length,
       replayNeeded: replayCandidates.length,

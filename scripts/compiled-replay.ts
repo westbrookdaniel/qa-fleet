@@ -221,8 +221,14 @@ await record({
   runtime,
 });
 
+const identityPath = path.join(workspace, '.fleet/target-identity.json');
+const identityJson = ' { "schemaVersion": 1, "ok": true }\n';
+await mkdir(path.dirname(identityPath), { recursive: true });
+await writeFile(identityPath, identityJson);
 const verifyArgs = [
   'verify',
+  '--target-identity',
+  identityPath,
   '--workspace',
   workspace,
   '--spec',
@@ -244,6 +250,12 @@ assert.ok(verified.checkpoint);
 const observation = JSON.parse(await readFile(verified.evidencePath, 'utf8')) as Observation;
 assert.equal(observation.spec, 'specs/counter.spec.ts');
 assert.equal(observation.observedPassing, true);
+assert.equal(observation.targetIdentity?.json, identityJson);
+const compiledStatus = JSON.parse(
+  command(executable, ['status', '--workspace', workspace], workspace),
+);
+assert.equal(compiledStatus.flows[0].targetIdentity.json, identityJson);
+assert.equal(compiledStatus.flows[0].targetIdentity.hash, observation.targetIdentity?.hash);
 assert.equal(git(workspace, ['rev-parse', 'HEAD']), verified.checkpoint);
 await record({
   name: 'compiled-verification',

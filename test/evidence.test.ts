@@ -414,3 +414,23 @@ test('schema-one observations remain historical and cannot become current passin
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('target identity preserves caller JSON bytes and rejects non-object receipts', async () => {
+  const { readTargetIdentity, digest } = await import('../lib/evidence.ts');
+  const directory = await mkdtemp(path.join(tmpdir(), 'fleet-target-'));
+  try {
+    const filename = path.join(directory, 'target.json');
+    const json = ' { "schemaVersion": 1, "ok": true }\n';
+    await writeFile(filename, json);
+    const identity = await readTargetIdentity(filename);
+    assert.equal(identity.json, json);
+    assert.equal(identity.hash, digest(json));
+    assert.deepEqual(identity.value, { schemaVersion: 1, ok: true });
+    for (const invalid of ['null', '[]', 'true', '{']) {
+      await writeFile(filename, invalid);
+      await assert.rejects(readTargetIdentity(filename));
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

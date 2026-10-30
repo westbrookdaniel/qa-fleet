@@ -257,3 +257,79 @@ test('missing sources and application changes are reported independently of brok
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('declared transitive app files scope evidence and select unrun flows from a worktree diff', async () => {
+  const { root, qa, app, observation } = await fixture();
+  const previousOverride = process.env.FLEET_APPLICATION_CHECKOUT;
+  try {
+    await mkdir(path.join(app, 'src'));
+    await writeFile(path.join(app, 'src/feature.ts'), 'before');
+    await writeFile(path.join(app, 'src/removed.ts'), 'removed');
+    execFileSync('git', ['-C', app, 'add', '.']);
+    execFileSync('git', [
+      '-C',
+      app,
+      '-c',
+      'user.name=Fixture',
+      '-c',
+      'user.email=fixture@example.invalid',
+      'commit',
+      '-m',
+      'App source',
+    ]);
+    // Throwing at module scope proves metadata inspection never executes it.
+    await writeFile(
+      path.join(qa, 'parts/shared.ts'),
+      "export const shared = true; export const appSources = ['src/**'] as const; throw new Error('must not execute');",
+    );
+    const record = await observation('search', 'shared');
+    const { applicationSources } = await import('../lib/application-sources.ts');
+    const appSources = await applicationSources(app, record.source.appSources ?? []);
+    assert.deepEqual(Object.keys(appSources.files), ['src/feature.ts', 'src/removed.ts']);
+    await writeFile(
+      path.join(qa, '.fleet/evidence/search.json'),
+      JSON.stringify({ ...record, applicationSources: appSources }),
+    );
+    await writeFile(path.join(app, 'unrelated.txt'), 'unrelated');
+    assert.equal((await maintenanceReport(qa)).summary.replayNeeded, 0);
+    await writeFile(path.join(app, 'src/feature.ts'), 'after');
+    await rm(path.join(app, 'src/removed.ts'));
+    await writeFile(path.join(app, 'src/added.ts'), 'untracked');
+    const affected = (await maintenanceReport(qa)).replayCandidates[0];
+    assert.deepEqual(affected.reasons, ['application-sources-changed']);
+    assert.deepEqual(affected.applicationChangedFiles, ['src/feature.ts']);
+    assert.deepEqual(affected.applicationAddedFiles, ['src/added.ts']);
+    assert.deepEqual(affected.applicationRemovedFiles, ['src/removed.ts']);
+    assert.equal((await flowStatus(qa)).flows[0].status, 'changed-since-observation');
+    await writeFile(path.join(qa, 'specs/unrun.spec.ts'), "import '../parts/shared.ts';");
+    await writeFile(path.join(qa, 'specs/unknown.spec.ts'), 'export const other = 1;');
+    await writeFile(
+      path.join(qa, 'fleet.json'),
+      JSON.stringify({ schemaVersion: 1, name: 'qa', applicationCheckout: '/nonexistent' }),
+    );
+    process.env.FLEET_APPLICATION_CHECKOUT = app;
+    const selected = (await maintenanceReport(qa, { appBase: 'HEAD' })).applicationDiff;
+    assert.deepEqual(
+      selected?.flows.map((flow) => [flow.spec, flow.status]),
+      [
+        ['specs/search.spec.ts', 'affected'],
+        ['specs/unknown.spec.ts', 'undeclared'],
+        ['specs/unrun.spec.ts', 'affected'],
+      ],
+    );
+    assert.deepEqual(selected?.flows[2].changedFiles, [
+      'src/added.ts',
+      'src/feature.ts',
+      'src/removed.ts',
+    ]);
+    await writeFile(
+      path.join(qa, 'parts/shared.ts'),
+      "export const appSources = [String('src/**')];",
+    );
+    await assert.rejects(workspaceSnapshot(qa, { spec: 'specs/unrun.spec.ts' }));
+  } finally {
+    if (previousOverride === undefined) delete process.env.FLEET_APPLICATION_CHECKOUT;
+    else process.env.FLEET_APPLICATION_CHECKOUT = previousOverride;
+    await rm(root, { recursive: true, force: true });
+  }
+}, 30_000);

@@ -102,3 +102,29 @@ Timeout, cancellation, or unsafe memory pressure retires owned CLI/browser proce
 A sandbox can deny the host pressure or process APIs before browser launch. Preserve that attempt as not run, then use the authorized host execution path with the same limits when available. Carry that environment requirement into subsequent runs; keep the pressure and cleanup guards enabled.
 
 Memory checks detect distress; they are not CPU/RSS limits. Checkout leases are automatic. Optional `db:<identity>` and `port:<identity>` locks coordinate Fleet runners, not external services or database rows. Process cleanup does not establish data restoration.
+
+## Application source declarations and target receipts
+
+A spec or imported part can declare a top-level `export const appSources =
+['src/components/checkout/**'] as const`. Only literal string arrays are accepted;
+Fleet reads the TypeScript compiler AST without executing source. Declarations
+are unioned across local imports. Paths are checkout-relative public file globs.
+Empty declarations explicitly select no files. Evidence records matched tracked
+and untracked files, their content hashes, and the combined hash. Unrelated app
+edits do not invalidate that flow. Without declarations, the whole checkout
+remains the conservative scope.
+
+`status --maintenance` reports `application-sources-changed` with
+`applicationChangedFiles`, `applicationAddedFiles` and `applicationRemovedFiles`.
+`status --maintenance --app-base origin/main` adds `applicationDiff`, comparing
+merge-base(ref, HEAD) to the working tree, including untracked files and both
+sides of renames. Its `flows` lists affected specs even without evidence, and
+undeclared specs as `undeclared` (unknown). This selector is independent of the
+paginated recorded-evidence replay candidates. `FLEET_APPLICATION_CHECKOUT`
+overrides the checkout for both operations.
+
+`verify --target-identity <json-file>` records any caller-produced JSON object,
+its original JSON text and SHA-256 hash. `status` shows that receipt. Target
+identity is caller-asserted evidence, not proof Fleet established: Fleet does
+not run a doctor or verify server revisions or mount identity. Keep secrets out
+of receipts.

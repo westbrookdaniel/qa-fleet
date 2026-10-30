@@ -264,3 +264,23 @@ test('failure after replacement rolls back both trees and launcher without losin
     assert.deepEqual(stages, []);
   });
 });
+
+test('a second agent skill target preserves the first skill and sibling saved data', async () => {
+  await withInstallation(async (options, parent) => {
+    const first = await installLocal(options);
+    const saved = path.join(first.installationDirectory, 'saved-data/receipt.json');
+    await mkdir(path.dirname(saved));
+    await writeFile(saved, 'preserve byte-for-byte');
+    const secondOptions = {
+      ...options,
+      skillDirectory: path.join(parent, 'claude/skills/qa-fleet'),
+    };
+    await installLocal(secondOptions);
+    await writeFile(path.join(options.skillSource, 'SKILL.md'), '# Updated both\n');
+    await installLocal(options);
+    await installLocal(secondOptions);
+    for (const skill of [options.skillDirectory, secondOptions.skillDirectory])
+      assert.equal(await readFile(path.join(skill, 'SKILL.md'), 'utf8'), '# Updated both\n');
+    assert.equal(await readFile(saved, 'utf8'), 'preserve byte-for-byte');
+  });
+});
